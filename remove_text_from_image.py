@@ -1,16 +1,17 @@
+# Uses DB18 deep learning model to detect text and either fill in the area with color (default) or outline it.
+#
 # Example usage:
-# uv run remove_text_from_image.py -i images/tps.jpeg -o output/output_image.png -c "red" --outline
+# uv run remove_text_from_image.py -i input/tps.jpeg -o output/output_image.png -c "red" --outline
+#
+# Adapted from https://opencv.org/blog/text-detection-and-removal-using-opencv/
 
 import argparse
 import os
 import math
 
 import cv2
-import numpy as np
 
-
-# Config flag to choose which detector to run: "DB18" or "EAST"
-DETECTOR = "DB18"
+from text_removal_helper import DETECTOR, remove_text_in_memory
 
 COLOR_MAP = {
     "black": (0, 0, 0),
@@ -80,61 +81,6 @@ def parse_color(color_str):
     )
 
 
-def build_detector(input_size):
-    detector_name = DETECTOR.upper()
-    if detector_name not in {"DB18", "EAST"}:
-        raise ValueError("DETECTOR must be either 'DB18' or 'EAST'")
-
-    if detector_name == "EAST":
-        model = cv2.dnn_TextDetectionModel_EAST("weights/frozen_east_text_detection.pb")
-        conf_thresh = 0.8
-        nms_thresh = 0.4
-        model.setConfidenceThreshold(conf_thresh).setNMSThreshold(nms_thresh)
-        model.setInputParams(1.0, input_size, (123.68, 116.78, 103.94), True)
-    else:
-        model = cv2.dnn_TextDetectionModel_DB("weights/DB_TD500_resnet18.onnx")
-        bin_thresh = 0.3
-        poly_thresh = 0.5
-        mean = (122.67891434, 116.66876762, 104.00698793)
-        model.setBinaryThreshold(bin_thresh).setPolygonThreshold(poly_thresh)
-        model.setInputParams(1.0 / 255, input_size, mean, True)
-
-    return model
-
-
-def detect_text_with_tiling(detector, full_image, tile_size):
-    """Run a detector on 320x320 tiles and merge detections to image coords."""
-    tile_w, tile_h = tile_size
-    height, width = full_image.shape[:2]
-    all_boxes = []
-
-    for y in range(0, height, tile_h):
-        for x in range(0, width, tile_w):
-            tile = full_image[y : min(y + tile_h, height), x : min(x + tile_w, width)]
-            if tile.size == 0:
-                continue
-
-            boxes, _ = detector.detect(tile)
-            if boxes is None:
-                continue
-
-            for box in boxes:
-                adjusted = np.array(box, dtype=np.float32)
-                adjusted[:, 0] += x
-                adjusted[:, 1] += y
-                all_boxes.append(adjusted)
-
-    return all_boxes
-
-
-def draw_boxes(boxes, canvas, color, outline_only):
-    thickness = 2 if outline_only else -1
-    for box in boxes:
-        points = np.array(box, np.int32)
-        x, y, w, h = cv2.boundingRect(points)
-        cv2.rectangle(canvas, (x, y), (x + w, y + h), color, thickness)
-
-
 def main():
     args = parse_args()
 
@@ -143,7 +89,6 @@ def main():
         raise FileNotFoundError(f"Could not read image at {args.input_path}")
 
     fill_color = parse_color(args.color)
-    output_image = image.copy()
 
     input_size = (320, 320)
     tile_w, tile_h = input_size
@@ -153,10 +98,14 @@ def main():
         f"Processing image in {tiles_x} tiles wide x {tiles_y} tiles high (tile size {tile_w}x{tile_h})"
     )
 
-    detector = build_detector(input_size)
-    default_filename = "output_image.png"
-    boxes = detect_text_with_tiling(detector, image, input_size)
-    draw_boxes(boxes, output_image, fill_color, args.outline)
+    output_image = remove_text_in_memory(
+        image,
+        fill_color=fill_color,
+        outline_only=args.outline,
+        input_size=input_size,
+        detector_name=DETECTOR,
+    )
+    default_filename = f"output_image_{DETECTOR.lower()}.png"
 
     os.makedirs("output", exist_ok=True)
     output_path = args.output_path or os.path.join("output", default_filename)

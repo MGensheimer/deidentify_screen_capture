@@ -1,0 +1,42 @@
+# Remove protected health information (PHI) from screen capture videos
+
+Author: Michael Gensheimer (michael.gensheimer@gmail.com) and Codex CLI.
+
+Text block removal from images was adapted from [this OpenCV tutorial](https://opencv.org/blog/text-detection-and-removal-using-opencv/).
+
+## About
+
+Use this repository to remove protected health information (PHI) such as patient name, ID, dates, etc. from screen capture videos. Text in the video is replaced by black boxes, and audio is replaced with a subtitles file that contains the transcript with any PHI removed.
+
+Sample output:
+
+![Sample output](sample_output.jpg)
+
+Note that large text blocks have been redacted but some small text snippets are still visible. _The process is not 100% reliable so continue to assume there is PHI in the output!_
+
+## Prerequisites (tested on Mac but should work on other platforms)
+
+- uv package manager
+- ffmpeg
+- Ollama with gemma3 model installed (4b version is smart enough and runs smoothly on Mac)
+- A transcription tool that can make a .srt subtitles file. Mac Whisper Pro with Parakeet v3 model is good, it is able to separate the different speakers. Or can try FFTrans Parakeet which is free, but I found the quality to be lower.
+
+## Steps
+
+1. Make subtitles file from the video file
+
+Use a transcription tool to make a .srt subtitles file (see Prerequisites).
+
+2. Deidentify the subtitles file (removes patient names, IDs, dates, etc.)
+
+`uv run deidentify_subtitles.py -i subtitles.srt -o subtitles_deid.srt`
+
+3. Remove audio and on-screen text from the video
+
+`uv run remove_text_from_video.py -i recording.mp4 -o recording_no_text.mp4 --interval 2 --extra-keyframes 1 --target-bitrate 1500k`
+
+This will find any letters/numbers in the video and change them to black boxes. I recommend keeping interval and extra-keyframes this way but you can try different values.
+
+## Result
+
+The result is a video file with the audio and on-screen text removed, and a subtitle file with the transcription. Name the .srt file with the same name as the video (as in, video.mp4 and video.srt). You can test out the finished product by loading the video in VLC and turning subtitles on.
