@@ -31,6 +31,12 @@ Use a transcription tool to make a .srt subtitles file (see Prerequisites).
 
 `uv run deidentify_subtitles.py -i subtitles.srt -o subtitles_deid.srt`
 
+If you prefer to call Google Vertex AI Gemini instead of a local Ollama model, supply your Vertex AI project and add `--use-gemini`:
+
+`uv run deidentify_subtitles.py -i subtitles.srt -o subtitles_deid.srt --use-gemini --google-project YOUR_PROJECT`
+
+The tool uses the `gemini-2.5-flash-lite` model by default; adjust `--google-location` or `--google-model` if your deployment needs different settings.
+
 3. Remove audio and on-screen text from the video
 
 `uv run remove_text_from_video.py -i recording.mp4 -o recording_no_text.mp4 --interval 2 --extra-keyframes 1 --target-bitrate 1500k`

@@ -1,4 +1,4 @@
-"""Deidentify SRT subtitle files by redacting sensitive text via Ollama."""
+"""Deidentify SRT subtitle files by redacting sensitive text via Ollama or Gemini."""
 
 from __future__ import annotations
 
@@ -10,11 +10,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Sequence
 
+try:  # Lazy import so Ollama-only workflows keep working without google-genai installed
+    from google import genai
+except ImportError:  # pragma: no cover - surfaced at runtime when Gemini option is used
+    genai = None
+
 
 DEFAULT_PROMPT_TEMPLATE = (
-    "Please return the following text, redacting any patient identifiers (names, IDs, dates, etc.) with [redacted identifier]. "
-    "For numbers, only redact patient IDs and dates. You do not need to redact other numbers such as radiation dose levels. "
-    "Return ONLY the deidentified text, no other text or explanations. Here is the text to clean: '{text}'"
+    "Please return the following text, replacing any patient identifiers (names, IDs, dates, etc.) with [redacted identifier]. "
+    "For numbers, only redact patient IDs and dates. Don't redact other numbers such as radiation dose levels. For names, only redact patient names, not doctor, software, or other names."
+    "Return ONLY the deidentified text, no other text or explanations. Some situations will be ambigious; use your best judgment. Here is the text to clean: '{text}'"
 )
 
 TIME_PATTERN = re.compile(
@@ -35,7 +40,7 @@ class SRTEntry:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Remove patient identifiers from an SRT file by calling Ollama."
+        description="Remove patient identifiers from an SRT file via Ollama or Gemini."
     )
     parser.add_argument(
         "-i",
@@ -85,6 +90,26 @@ def parse_args() -> argparse.Namespace:
         "--quiet",
         action="store_true",
         help="Suppress per-entry progress messages.",
+    )
+    parser.add_argument(
+        "--use-gemini",
+        action="store_true",
+        help="Call Google Vertex AI Gemini instead of Ollama.",
+    )
+    parser.add_argument(
+        "--google-project",
+        default=None,
+        help="Google Cloud project ID used with Vertex AI (required with --use-gemini).",
+    )
+    parser.add_argument(
+        "--google-location",
+        default="global",
+        help="Vertex AI location (default: global).",
+    )
+    parser.add_argument(
+        "--google-model",
+        default="gemini-2.5-flash-lite",
+        help="Gemini model name to invoke (default: gemini-2.5-flash-lite).",
     )
     return parser.parse_args()
 
@@ -177,6 +202,44 @@ def run_ollama_prompt(
     return cleaned if cleaned else text
 
 
+def create_gemini_client(project: str, location: str):
+    if genai is None:  # pragma: no cover - depends on optional dependency at runtime
+        raise RuntimeError(
+            "google-genai is not installed. Install it or run without --use-gemini."
+        )
+
+    try:
+        return genai.Client(vertexai=True, project=project, location=location)
+    except Exception as exc:  # noqa: BLE001 - surface readable message
+        raise RuntimeError(
+            "Unable to initialize Google Vertex AI client. "
+            "Check your project/location configuration and authentication."
+        ) from exc
+
+
+def run_gemini_prompt(
+    *,
+    client,
+    text: str,
+    model: str,
+    prompt_template: str,
+    dry_run: bool,
+) -> str:
+    if dry_run or not text.strip():
+        return text
+
+    prompt = prompt_template.format(text=text)
+    try:
+        response = client.models.generate_content(model=model, contents=prompt)
+    except Exception as exc:  # noqa: BLE001 - surface readable message
+        raise RuntimeError(
+            "Vertex AI Gemini call failed. Ensure the model is available in the selected region."
+        ) from exc
+
+    cleaned = getattr(response, "text", "").strip()
+    return cleaned if cleaned else text
+
+
 def determine_output_path(input_path: Path, output_arg: str | None) -> Path:
     if output_arg:
         return Path(output_arg).expanduser()
@@ -199,6 +262,13 @@ def main() -> None:
     except UnicodeDecodeError:
         content = input_path.read_text(encoding="utf-8-sig")
 
+    if args.use_gemini and not args.google_project:
+        raise SystemExit("--google-project is required when using --use-gemini.")
+
+    gemini_client = None
+    if args.use_gemini:
+        gemini_client = create_gemini_client(args.google_project, args.google_location)
+
     entries = parse_srt_entries(content)
     cleaned_entries: List[SRTEntry] = []
 
@@ -207,14 +277,23 @@ def main() -> None:
         if not args.quiet:
             print(f"Deidentifying entry {entry.index} ({len(original_text)} chars)...")
 
-        cleaned_text = run_ollama_prompt(
-            text=original_text,
-            model=args.model,
-            prompt_template=args.prompt_template,
-            ollama_bin=args.ollama_bin,
-            timeout=args.timeout,
-            dry_run=args.dry_run,
-        )
+        if args.use_gemini:
+            cleaned_text = run_gemini_prompt(
+                client=gemini_client,
+                text=original_text,
+                model=args.google_model,
+                prompt_template=args.prompt_template,
+                dry_run=args.dry_run,
+            )
+        else:
+            cleaned_text = run_ollama_prompt(
+                text=original_text,
+                model=args.model,
+                prompt_template=args.prompt_template,
+                ollama_bin=args.ollama_bin,
+                timeout=args.timeout,
+                dry_run=args.dry_run,
+            )
         new_lines = cleaned_text.splitlines()
         entry.text_lines = new_lines if new_lines else [""]
         cleaned_entries.append(entry)
