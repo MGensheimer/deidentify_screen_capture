@@ -12,8 +12,9 @@ from typing import List, Sequence
 
 
 DEFAULT_PROMPT_TEMPLATE = (
-    "Please return the following text, redacting any patient identifiers (names, IDs, dates, etc.) "
-    "with [redacted identifier]. Return ONLY the modified text, no other text or explanations. When in doubt, redact that part of the text. Here is the text to redaact: '{text}'"
+    "Please return the following text, redacting any patient identifiers (names, IDs, dates, etc.) with [redacted identifier]. "
+    "For numbers, only redact patient IDs and dates. You do not need to redact other numbers such as radiation dose levels. "
+    "Return ONLY the deidentified text, no other text or explanations. Here is the text to clean: '{text}'"
 )
 
 TIME_PATTERN = re.compile(
