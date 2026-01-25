@@ -54,6 +54,11 @@ def parse_args():
         action="store_true",
         help="Draw only the outline of detected text regions",
     )
+    parser.add_argument(
+        "--ocr",
+        action="store_true",
+        help="Enable OCR mode: fill boxes with black and overlay detected text in white",
+    )
     return parser.parse_args()
 
 
@@ -102,6 +107,7 @@ def main():
         image,
         fill_color=fill_color,
         outline_only=args.outline,
+        ocr_mode=args.ocr,
         input_size=input_size,
         detector_name=DETECTOR,
     )
