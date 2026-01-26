@@ -55,9 +55,33 @@ def parse_args():
         help="Draw only the outline of detected text regions",
     )
     parser.add_argument(
-        "--ocr",
+        "-p",
+        "--phrase",
+        dest="phrases",
+        action="append",
+        default=None,
+        help="Phrase to redact (can be used multiple times). Matching is case-insensitive "
+             "and ignores spaces/punctuation. Only matching text boxes are redacted; "
+             "non-matching boxes are left untouched.",
+    )
+    parser.add_argument(
+        "--redact_dates_times",
         action="store_true",
-        help="Enable OCR mode: fill boxes with black and overlay detected text in white",
+        help="Redact all dates and times (e.g., YYYY-MM-DD, MM/DD/YYYY, 11:23, 7:11 AM, etc.)",
+    )
+    parser.add_argument(
+        "--redact_digits",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Redact text boxes containing at least N consecutive digits "
+             "(spaces/punctuation are ignored when counting).",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print OCR'd text from each detected text box (useful for debugging).",
     )
     return parser.parse_args()
 
@@ -107,7 +131,10 @@ def main():
         image,
         fill_color=fill_color,
         outline_only=args.outline,
-        ocr_mode=args.ocr,
+        redact_phrases=args.phrases,
+        redact_dates_times=args.redact_dates_times,
+        redact_min_digits=args.redact_digits,
+        verbose=args.verbose,
         input_size=input_size,
         detector_name=DETECTOR,
     )

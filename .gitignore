@@ -10,5 +10,6 @@ output/
 weights/
 .DS_Store
 temp.txt
+temp_output.txt
 scrap.py
 .DS_Store
