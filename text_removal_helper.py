@@ -40,17 +40,45 @@ def build_detector(input_size: Tuple[int, int], detector_name: str = DETECTOR):
     return model
 
 
+def tile_start_positions(total: int, tile: int, step: int) -> list[int]:
+    """Return start positions that fully cover a dimension with overlap."""
+    if tile <= 0:
+        raise ValueError("tile size must be positive")
+    if step <= 0:
+        raise ValueError("step size must be positive")
+    if total <= tile:
+        return [0]
+
+    last_start = total - tile
+    starts = list(range(0, last_start + 1, step))
+    if starts[-1] != last_start:
+        starts.append(last_start)
+    return starts
+
+
 def detect_text_with_tiling(
-    detector, full_image: np.ndarray, tile_size: Tuple[int, int]
+    detector,
+    full_image: np.ndarray,
+    tile_size: Tuple[int, int],
+    *,
+    overlap: float = 0.0,
 ) -> list[np.ndarray]:
     """Run a detector on fixed-size tiles and merge detections to image coords."""
+
+    if not (0.0 <= overlap < 1.0):
+        raise ValueError("overlap must be >= 0 and < 1")
 
     tile_w, tile_h = tile_size
     height, width = full_image.shape[:2]
     all_boxes: list[np.ndarray] = []
 
-    for y in range(0, height, tile_h):
-        for x in range(0, width, tile_w):
+    step_w = max(1, int(round(tile_w * (1.0 - overlap))))
+    step_h = max(1, int(round(tile_h * (1.0 - overlap))))
+    x_starts = tile_start_positions(width, tile_w, step_w)
+    y_starts = tile_start_positions(height, tile_h, step_h)
+
+    for y in y_starts:
+        for x in x_starts:
             tile = full_image[y : min(y + tile_h, height), x : min(x + tile_w, width)]
             if tile.size == 0:
                 continue
@@ -276,6 +304,7 @@ def remove_text_in_memory(
     redact_min_digits: int | None = None,
     verbose: bool = False,
     input_size: Tuple[int, int] = (320, 320),
+    tile_overlap: float = 0.0,
     detector_name: str = DETECTOR,
     detector=None,
 ):
@@ -292,7 +321,9 @@ def remove_text_in_memory(
         raise ValueError("image cannot be None")
 
     local_detector = detector or build_detector(input_size, detector_name=detector_name)
-    boxes = detect_text_with_tiling(local_detector, image, input_size)
+    boxes = detect_text_with_tiling(
+        local_detector, image, input_size, overlap=tile_overlap
+    )
     
     if verbose:
         print(f"Detected {len(boxes)} text box(es)")

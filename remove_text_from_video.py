@@ -103,6 +103,13 @@ def parse_args():
         help="Tile size fed to the detector (default: 320 320)",
     )
     parser.add_argument(
+        "--tile-overlap",
+        dest="tile_overlap",
+        type=float,
+        default=0.5,
+        help="Tile overlap as a fraction of tile size (0.0-<1.0). Default: 0.5",
+    )
+    parser.add_argument(
         "--extra-keyframes",
         dest="extra_keyframes",
         type=int,
@@ -289,6 +296,8 @@ def main():
         raise ValueError("--interval must be greater than 0")
     if args.extra_keyframes < 0:
         raise ValueError("--extra-keyframes must be 0 or a positive integer")
+    if not (0.0 <= args.tile_overlap < 1.0):
+        raise ValueError("--tile-overlap must be >= 0 and < 1")
 
     video_path = args.input_path
     cap = cv2.VideoCapture(video_path)
@@ -303,6 +312,7 @@ def main():
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fill_color = parse_color(args.color)
     tile_size = tuple(args.tile_size)
+    tile_overlap = args.tile_overlap
     detector = build_detector(tile_size, detector_name=args.detector_name)
 
     os.makedirs("output", exist_ok=True)
@@ -348,7 +358,9 @@ def main():
     highest_finalized_slot: Optional[int] = None
 
     def detect_boxes(frame):
-        return detect_text_with_tiling(detector, frame, tile_size)
+        return detect_text_with_tiling(
+            detector, frame, tile_size, overlap=tile_overlap
+        )
 
     def flush_ready_slots(force: bool = False):
         nonlocal slot_queue, coverage_map, highest_finalized_slot

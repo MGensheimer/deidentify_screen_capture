@@ -43,6 +43,7 @@ The tool uses the `gemini-2.5-flash-lite` model by default; adjust `--google-loc
 `uv run remove_text_from_video.py -i recording.mp4 -o recording_no_text.mp4 --interval 2 --extra-keyframes 1 --target-bitrate 1500k`
 
 This will find any letters/numbers in the video and change them to black boxes. I recommend keeping interval and extra-keyframes this way but you can try different values.
+By default, detection uses overlapping tiles (50% overlap) to better catch text that crosses tile seams. You can adjust with `--tile-overlap` (0.0-<1.0).
 
 ### Selective redaction with OCR
 
@@ -65,6 +66,16 @@ Instead of redacting all text, you can use OCR to selectively redact only specif
 `uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 --redact_dates_times --redact_digits 5 -p "Confidential"`
 
 Use `-v` (verbose) to see what text is being detected and redacted on each keyframe—helpful for debugging.
+
+### Tiling overlap
+
+Large images and video frames are processed in tiles for speed. To avoid missing text that spans tile boundaries, the detector runs on overlapping tiles by default (50% overlap). You can change this with `--tile-overlap`, for example:
+
+`uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 --tile-overlap 0.25`
+
+The same flag is available for images:
+
+`uv run remove_text_from_image.py -i input/tps.jpeg -o output/output_image.png --tile-overlap 0.25`
 
 ### Testing with a short clip
 

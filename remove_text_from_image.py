@@ -55,6 +55,12 @@ def parse_args():
         help="Draw only the outline of detected text regions",
     )
     parser.add_argument(
+        "--tile-overlap",
+        type=float,
+        default=0.5,
+        help="Tile overlap as a fraction of tile size (0.0-<1.0). Default: 0.5",
+    )
+    parser.add_argument(
         "-p",
         "--phrase",
         dest="phrases",
@@ -116,15 +122,21 @@ def main():
     image = cv2.imread(args.input_path)
     if image is None:
         raise FileNotFoundError(f"Could not read image at {args.input_path}")
+    if not (0.0 <= args.tile_overlap < 1.0):
+        raise ValueError("--tile-overlap must be >= 0 and < 1")
 
     fill_color = parse_color(args.color)
 
     input_size = (320, 320)
     tile_w, tile_h = input_size
-    tiles_x = math.ceil(image.shape[1] / tile_w)
-    tiles_y = math.ceil(image.shape[0] / tile_h)
+    overlap = args.tile_overlap
+    step_w = max(1, int(round(tile_w * (1.0 - overlap))))
+    step_h = max(1, int(round(tile_h * (1.0 - overlap))))
+    tiles_x = math.ceil((image.shape[1] - tile_w) / step_w) + 1 if image.shape[1] > tile_w else 1
+    tiles_y = math.ceil((image.shape[0] - tile_h) / step_h) + 1 if image.shape[0] > tile_h else 1
     print(
-        f"Processing image in {tiles_x} tiles wide x {tiles_y} tiles high (tile size {tile_w}x{tile_h})"
+        f"Processing image in {tiles_x} tiles wide x {tiles_y} tiles high "
+        f"(tile size {tile_w}x{tile_h}, overlap {overlap:.2f})"
     )
 
     output_image = remove_text_in_memory(
@@ -136,6 +148,7 @@ def main():
         redact_min_digits=args.redact_digits,
         verbose=args.verbose,
         input_size=input_size,
+        tile_overlap=overlap,
         detector_name=DETECTOR,
     )
     default_filename = f"output_image_{DETECTOR.lower()}.png"
