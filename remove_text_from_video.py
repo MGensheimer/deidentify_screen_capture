@@ -22,6 +22,8 @@ from text_removal_helper import (
     build_detector,
     detect_text_with_tiling,
     draw_boxes,
+    ocr_region,
+    should_redact_box,
 )
 
 
@@ -116,6 +118,42 @@ def parse_args():
         default="1500k",
         help="Explicit ffmpeg bitrate string (e.g., 1500k) used for recompression.",
     )
+    parser.add_argument(
+        "-p",
+        "--phrase",
+        dest="phrases",
+        action="append",
+        default=None,
+        help="Phrase to redact (can be used multiple times). Matching is case-insensitive "
+             "and ignores spaces/punctuation. Only matching text boxes are redacted; "
+             "non-matching boxes are left untouched.",
+    )
+    parser.add_argument(
+        "--redact_dates_times",
+        action="store_true",
+        help="Redact all dates and times (e.g., YYYY-MM-DD, MM/DD/YYYY, 11:23, 7:11 AM, etc.)",
+    )
+    parser.add_argument(
+        "--redact_digits",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Redact text boxes containing at least N consecutive digits "
+             "(spaces/punctuation are ignored when counting).",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print OCR'd text from each detected text box on keyframes (useful for debugging).",
+    )
+    parser.add_argument(
+        "--only_first_seconds",
+        type=float,
+        metavar="SECONDS",
+        default=None,
+        help="Only process the first N seconds of the video (useful for testing).",
+    )
     return parser.parse_args()
 
 
@@ -142,6 +180,54 @@ def parse_color(color_str: str) -> Color:
     raise ValueError(
         "Color must be a named color, #RRGGBB hex, or comma-separated R,G,B values"
     )
+
+
+def filter_boxes_with_ocr(
+    boxes: List[np.ndarray],
+    frame: np.ndarray,
+    redact_phrases: Optional[List[str]],
+    redact_dates_times: bool,
+    redact_min_digits: Optional[int],
+    verbose: bool,
+) -> List[np.ndarray]:
+    """Filter detected boxes using OCR, keeping only those matching redaction criteria.
+    
+    This runs OCR on each detected box and returns only the boxes that should be
+    redacted based on the filtering criteria (phrases, dates/times, digit count).
+    
+    If no filtering criteria are active, returns all boxes unchanged.
+    """
+    has_filters = redact_phrases or redact_dates_times or redact_min_digits is not None
+    
+    if not has_filters:
+        # No filtering - return all boxes
+        if verbose:
+            print(f"  No OCR filters active, keeping all {len(boxes)} boxes")
+        return boxes
+    
+    filtered_boxes = []
+    
+    for i, box in enumerate(boxes):
+        points = np.array(box, np.int32)
+        x, y, w, h = cv2.boundingRect(points)
+        
+        # OCR the region
+        text = ocr_region(frame, x, y, w, h)
+        
+        # Check if it matches redaction criteria
+        should_redact = should_redact_box(
+            text, redact_phrases, redact_dates_times, redact_min_digits
+        )
+        
+        if verbose:
+            status = "[REDACT]" if should_redact else "[skip]"
+            text_display = text.replace('\n', '\\n')
+            print(f"  Box {i+1} @ ({x},{y}) {w}x{h}: {status} \"{text_display}\"")
+        
+        if should_redact:
+            filtered_boxes.append(box)
+    
+    return filtered_boxes
 
 
 def maybe_recompress_video(video_path: str, target_bitrate: Optional[str]):
@@ -230,10 +316,19 @@ def main():
 
     total_frames_value = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     total_frames = total_frames_value if total_frames_value > 0 else None
+    
+    # Adjust total frames if --only_first_seconds is set
+    if args.only_first_seconds is not None and total_frames:
+        limited_frames = int(args.only_first_seconds * fps)
+        total_frames = min(total_frames, limited_frames)
+    
     if total_frames:
         total_duration = total_frames / fps
+        duration_note = ""
+        if args.only_first_seconds is not None:
+            duration_note = f" (limited to first {args.only_first_seconds}s)"
         print(
-            f"Processing {total_frames} frames (~{total_duration:.1f}s) from {video_path}"
+            f"Processing {total_frames} frames (~{total_duration:.1f}s) from {video_path}{duration_note}"
         )
     else:
         print(f"Processing video {video_path} (unknown frame count)")
@@ -294,6 +389,17 @@ def main():
             )
             boxes = detect_boxes(sample_frame)
             slot_reference_timestamp = reference_time
+            if args.verbose:
+                print(f"Keyframe (fallback) at {reference_time:.2f}s: detected {len(boxes)} boxes")
+            # Apply OCR filtering if any filters are active
+            boxes = filter_boxes_with_ocr(
+                boxes,
+                sample_frame,
+                args.phrases,
+                args.redact_dates_times,
+                args.redact_digits,
+                args.verbose,
+            )
 
         slot_queue.append(
             {"index": slot_index, "frames": [frame for frame, _ in slot_frames]}
@@ -332,6 +438,11 @@ def main():
                 break
 
             timestamp = frame_idx * frame_duration
+            
+            # Stop early if --only_first_seconds is set
+            if args.only_first_seconds is not None and timestamp >= args.only_first_seconds:
+                break
+            
             frame_idx += 1
             processed_frames = frame_idx
             if total_frames:
@@ -362,6 +473,17 @@ def main():
             if slot_boxes is None and timestamp >= slot_sample_time:
                 slot_boxes = detect_boxes(frame)
                 slot_reference_timestamp = timestamp
+                if args.verbose:
+                    print(f"Keyframe at {timestamp:.2f}s: detected {len(slot_boxes)} boxes")
+                # Apply OCR filtering if any filters are active
+                slot_boxes = filter_boxes_with_ocr(
+                    slot_boxes,
+                    frame,
+                    args.phrases,
+                    args.redact_dates_times,
+                    args.redact_digits,
+                    args.verbose,
+                )
 
         # Flush the final slot and any buffered slots still awaiting future detections
         finalize_slot(slot_sample_time)
