@@ -18,6 +18,7 @@ Note that large text blocks have been redacted but some small text snippets are 
 
 - uv package manager
 - ffmpeg
+- Tesseract OCR (required for selective redaction features; install with `brew install tesseract` on Mac)
 - Ollama with gemma3 model installed (4b version is smart enough and runs smoothly on Mac)
 - A transcription tool that can make a .srt subtitles file. Mac Whisper Pro with Parakeet v3 model is good, it is able to separate the different speakers. Or can try FFTrans Parakeet which is free, but I found the quality to be lower.
 
@@ -42,6 +43,34 @@ The tool uses the `gemini-2.5-flash-lite` model by default; adjust `--google-loc
 `uv run remove_text_from_video.py -i recording.mp4 -o recording_no_text.mp4 --interval 2 --extra-keyframes 1 --target-bitrate 1500k`
 
 This will find any letters/numbers in the video and change them to black boxes. I recommend keeping interval and extra-keyframes this way but you can try different values.
+
+### Selective redaction with OCR
+
+Instead of redacting all text, you can use OCR to selectively redact only specific content. This is useful when you want to preserve some on-screen text while removing PHI.
+
+**Redact specific phrases** (case-insensitive, ignores spaces/punctuation):
+
+`uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 -p "John Smith" -p "Patient Name"`
+
+**Redact dates and times** (various formats like YYYY-MM-DD, MM/DD/YYYY, 11:23 AM, etc.):
+
+`uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 --redact_dates_times`
+
+**Redact long numbers** (e.g., patient IDs, phone numbers with 7+ digits):
+
+`uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 --redact_digits 7`
+
+**Combine multiple filters:**
+
+`uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 --redact_dates_times --redact_digits 5 -p "Confidential"`
+
+Use `-v` (verbose) to see what text is being detected and redacted on each keyframe—helpful for debugging.
+
+### Testing with a short clip
+
+Use `--only_first_seconds` to process only the beginning of a video, which is useful for testing settings:
+
+`uv run remove_text_from_video.py -i recording.mp4 -o test_output.mp4 --redact_dates_times -v --only_first_seconds 10`
 
 ## Result
 
