@@ -96,13 +96,12 @@ def parse_args():
         help="Text detector backend to use (default: %(default)s)",
     )
     parser.add_argument(
-        "--tesseract-full-frame",
-        action="store_true",
-        help=(
-            "Use Tesseract on the full keyframe to produce line-level boxes "
-            "instead of the OpenCV text detector."
-        ),
+        "--no-tesseract-full-frame",
+        dest="tesseract_full_frame",
+        action="store_false",
+        help="Disable Tesseract full-frame line detection and use the OpenCV detector.",
     )
+    parser.set_defaults(tesseract_full_frame=True)
     parser.add_argument(
         "--tesseract-min-conf",
         type=float,
