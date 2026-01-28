@@ -16,6 +16,8 @@ from typing import Any, DefaultDict, Deque, Dict, List, Optional, Sequence, Tupl
 
 import cv2
 import numpy as np
+import pytesseract
+from pytesseract import Output
 
 from text_removal_helper import (
     DETECTOR,
@@ -92,6 +94,23 @@ def parse_args():
         choices=["DB18", "EAST"],
         default=DETECTOR,
         help="Text detector backend to use (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--tesseract-full-frame",
+        action="store_true",
+        help=(
+            "Use Tesseract on the full keyframe to produce line-level boxes "
+            "instead of the OpenCV text detector."
+        ),
+    )
+    parser.add_argument(
+        "--tesseract-min-conf",
+        type=float,
+        default=-1.0,
+        help=(
+            "Minimum Tesseract confidence to keep a word when building line boxes "
+            "(default: -1, include all non-empty text)."
+        ),
     )
     parser.add_argument(
         "--tile",
@@ -237,6 +256,103 @@ def filter_boxes_with_ocr(
     return filtered_boxes
 
 
+def detect_tesseract_line_boxes(
+    frame: np.ndarray,
+    *,
+    min_confidence: float,
+    redact_phrases: Optional[List[str]],
+    redact_dates_times: bool,
+    redact_min_digits: Optional[int],
+    verbose: bool,
+) -> List[np.ndarray]:
+    """Run Tesseract on a full frame and return line-level boxes."""
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    config = "--psm 11 -c load_system_dawg=0 -c load_freq_dawg=0"
+    ocr_data = pytesseract.image_to_data(
+        rgb,
+        output_type=Output.DICT,
+        lang="eng",
+        config=config,
+    )
+
+    lines: Dict[Tuple[int, int, int], List[Tuple[str, int, int, int, int]]] = {}
+    num_items = len(ocr_data["text"])
+    for i in range(num_items):
+        text = ocr_data["text"][i].strip()
+        if not text:
+            continue
+        try:
+            conf = float(ocr_data["conf"][i])
+        except ValueError:
+            conf = -1.0
+        if conf < min_confidence:
+            continue
+        key = (
+            int(ocr_data["block_num"][i]),
+            int(ocr_data["par_num"][i]),
+            int(ocr_data["line_num"][i]),
+        )
+        left = int(ocr_data["left"][i])
+        top = int(ocr_data["top"][i])
+        width = int(ocr_data["width"][i])
+        height = int(ocr_data["height"][i])
+        lines.setdefault(key, []).append((text, left, top, width, height))
+
+    if verbose:
+        print(f"Tesseract detected {len(lines)} line(s)")
+
+    has_filters = redact_phrases or redact_dates_times or redact_min_digits is not None
+    boxes: List[np.ndarray] = []
+
+    for idx, items in enumerate(lines.values(), start=1):
+        texts = [item[0] for item in items]
+        lefts = [item[1] for item in items]
+        tops = [item[2] for item in items]
+        rights = [item[1] + item[3] for item in items]
+        bottoms = [item[2] + item[4] for item in items]
+        left = min(lefts)
+        top = min(tops)
+        right = max(rights)
+        bottom = max(bottoms)
+        line_text = " ".join(texts)
+
+        if has_filters:
+            should_redact = should_redact_box(
+                line_text, redact_phrases, redact_dates_times, redact_min_digits
+            )
+            if verbose:
+                status = "[REDACT]" if should_redact else "[skip]"
+                text_display = line_text.replace("\n", "\\n")
+                print(
+                    f"  Line {idx} @ ({left},{top}) {right-left}x{bottom-top}: "
+                    f"{status} \"{text_display}\""
+                )
+            if not should_redact:
+                continue
+        elif verbose:
+            text_display = line_text.replace("\n", "\\n")
+            print(
+                f"  Line {idx} @ ({left},{top}) {right-left}x{bottom-top}: "
+                f"\"{text_display}\""
+            )
+
+        box = np.array(
+            [
+                [left, top],
+                [right, top],
+                [right, bottom],
+                [left, bottom],
+            ],
+            dtype=np.float32,
+        )
+        boxes.append(box)
+
+    if verbose and has_filters:
+        print(f"Tesseract kept {len(boxes)} line(s) after filtering")
+
+    return boxes
+
+
 def maybe_recompress_video(video_path: str, target_bitrate: Optional[str]):
     """Recompress the written video via ffmpeg using a constant bitrate."""
 
@@ -313,7 +429,9 @@ def main():
     fill_color = parse_color(args.color)
     tile_size = tuple(args.tile_size)
     tile_overlap = args.tile_overlap
-    detector = build_detector(tile_size, detector_name=args.detector_name)
+    detector = None
+    if not args.tesseract_full_frame:
+        detector = build_detector(tile_size, detector_name=args.detector_name)
 
     os.makedirs("output", exist_ok=True)
     default_name = "output_video.mp4"
@@ -358,8 +476,27 @@ def main():
     highest_finalized_slot: Optional[int] = None
 
     def detect_boxes(frame):
-        return detect_text_with_tiling(
+        if args.tesseract_full_frame:
+            return detect_tesseract_line_boxes(
+                frame,
+                min_confidence=args.tesseract_min_conf,
+                redact_phrases=args.phrases,
+                redact_dates_times=args.redact_dates_times,
+                redact_min_digits=args.redact_digits,
+                verbose=args.verbose,
+            )
+        boxes = detect_text_with_tiling(
             detector, frame, tile_size, overlap=tile_overlap
+        )
+        if args.verbose:
+            print(f"Detected {len(boxes)} text box(es)")
+        return filter_boxes_with_ocr(
+            boxes,
+            frame,
+            args.phrases,
+            args.redact_dates_times,
+            args.redact_digits,
+            args.verbose,
         )
 
     def flush_ready_slots(force: bool = False):
@@ -403,15 +540,6 @@ def main():
             slot_reference_timestamp = reference_time
             if args.verbose:
                 print(f"Keyframe (fallback) at {reference_time:.2f}s: detected {len(boxes)} boxes")
-            # Apply OCR filtering if any filters are active
-            boxes = filter_boxes_with_ocr(
-                boxes,
-                sample_frame,
-                args.phrases,
-                args.redact_dates_times,
-                args.redact_digits,
-                args.verbose,
-            )
 
         slot_queue.append(
             {"index": slot_index, "frames": [frame for frame, _ in slot_frames]}
@@ -487,15 +615,6 @@ def main():
                 slot_reference_timestamp = timestamp
                 if args.verbose:
                     print(f"Keyframe at {timestamp:.2f}s: detected {len(slot_boxes)} boxes")
-                # Apply OCR filtering if any filters are active
-                slot_boxes = filter_boxes_with_ocr(
-                    slot_boxes,
-                    frame,
-                    args.phrases,
-                    args.redact_dates_times,
-                    args.redact_digits,
-                    args.verbose,
-                )
 
         # Flush the final slot and any buffered slots still awaiting future detections
         finalize_slot(slot_sample_time)
