@@ -43,7 +43,7 @@ The tool uses the `gemini-2.5-flash-lite` model by default; adjust `--google-loc
 `uv run remove_text_from_video.py -i recording.mp4 -o recording_no_text.mp4 --interval 2 --extra-keyframes 1 --target-bitrate 1500k`
 
 This will find any letters/numbers in the video and change them to black boxes. I recommend keeping interval and extra-keyframes this way but you can try different values.
-By default, detection uses overlapping tiles (50% overlap) to better catch text that crosses tile seams. You can adjust with `--tile-overlap` (0.0-<1.0).
+By default, detection runs Tesseract on each keyframe to produce line-level boxes. To use the OpenCV detector instead, pass `--no-tesseract-full-frame` (this path is quite slow).
 
 ### Selective redaction with OCR
 
@@ -66,10 +66,11 @@ Instead of redacting all text, you can use OCR to selectively redact only specif
 `uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 --redact_dates_times --redact_digits 5 -p "Confidential"`
 
 Use `-v` (verbose) to see what text is being detected and redacted on each keyframe—helpful for debugging.
+If you need to tune OCR sensitivity, lower `--tesseract-min-conf` (default: -1 keeps all non-empty text).
 
 ### Tiling overlap
 
-Large images and video frames are processed in tiles for speed. To avoid missing text that spans tile boundaries, the detector runs on overlapping tiles by default (50% overlap). You can change this with `--tile-overlap`, for example:
+Large images and video frames are processed in tiles for speed when using the OpenCV detector. In that mode, OpenCV first finds text bounding boxes, then each box is OCR’d with Tesseract (slower than full-frame Tesseract, but can yield slightly higher quality). To avoid missing text that spans tile boundaries, the detector runs on overlapping tiles by default (50% overlap). You can change this with `--tile-overlap`, for example:
 
 `uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 --tile-overlap 0.25`
 
