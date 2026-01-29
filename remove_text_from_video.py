@@ -10,6 +10,7 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, DefaultDict, Deque, Dict, List, Optional, Sequence, Tuple
@@ -413,6 +414,11 @@ def main():
         raise ValueError("--extra-keyframes must be 0 or a positive integer")
     if not (0.0 <= args.tile_overlap < 1.0):
         raise ValueError("--tile-overlap must be >= 0 and < 1")
+    if args.tesseract_full_frame and "--tile-overlap" in sys.argv:
+        raise ValueError(
+            "--tile-overlap is only valid with the OpenCV detector. "
+            "Use --no-tesseract-full-frame to enable it."
+        )
 
     video_path = args.input_path
     cap = cv2.VideoCapture(video_path)
