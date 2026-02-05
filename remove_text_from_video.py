@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
-import sys
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, DefaultDict, Deque, Dict, List, Optional, Sequence, Tuple
-import re
 
 import cv2
 import numpy as np
@@ -22,34 +21,20 @@ import pytesseract
 from pytesseract import Output
 
 from text_removal_helper import (
-    DETECTOR,
     build_detector,
     detect_text_with_tiling,
     draw_boxes,
+    preprocess_for_text_detection,
 )
 
 
-Color = Tuple[int, int, int]
 SlotBufferEntry = Dict[str, Any]
-
-
-COLOR_MAP = {
-    "black": (0, 0, 0),
-    "white": (255, 255, 255),
-    "red": (0, 0, 255),
-    "green": (0, 255, 0),
-    "blue": (255, 0, 0),
-    "yellow": (0, 255, 255),
-    "cyan": (255, 255, 0),
-    "magenta": (255, 0, 255),
-    "gray": (127, 127, 127),
-}
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Remove or outline text in a video by reusing detections across fixed intervals"
+            "Remove text in a video by reusing detections across fixed intervals"
         )
     )
     parser.add_argument(
@@ -67,18 +52,6 @@ def parse_args():
         help="Path to save the processed video (default: output/output_video.mp4)",
     )
     parser.add_argument(
-        "-c",
-        "--color",
-        dest="color",
-        default="black",
-        help="Fill/outline color (name, #RRGGBB, or R,G,B). Default: black",
-    )
-    parser.add_argument(
-        "--outline",
-        action="store_true",
-        help="Draw only the outline of detected text regions",
-    )
-    parser.add_argument(
         "--interval",
         dest="interval_seconds",
         type=float,
@@ -91,17 +64,10 @@ def parse_args():
     parser.add_argument(
         "--detector",
         dest="detector_name",
-        choices=["DB18", "EAST"],
-        default=DETECTOR,
+        choices=["DB50", "DB18", "EAST"],
+        default="DB50",
         help="Text detector backend to use (default: %(default)s)",
     )
-    parser.add_argument(
-        "--no-tesseract-full-frame",
-        dest="tesseract_full_frame",
-        action="store_false",
-        help="Disable Tesseract full-frame line detection and use the OpenCV detector.",
-    )
-    parser.set_defaults(tesseract_full_frame=True)
     parser.add_argument(
         "--tesseract-min-conf",
         type=float,
@@ -117,15 +83,15 @@ def parse_args():
         type=int,
         nargs=2,
         metavar=("WIDTH", "HEIGHT"),
-        default=(320, 320),
-        help="Tile size fed to the detector (default: 320 320)",
+        default=(736, 736),
+        help="Tile size fed to the detector (default: 736 736)",
     )
     parser.add_argument(
         "--tile-overlap",
         dest="tile_overlap",
         type=float,
-        default=0.5,
-        help="Tile overlap as a fraction of tile size (0.0-<1.0). Default: 0.5",
+        default=0.25,
+        help="Tile overlap as a fraction of tile size (0.0-<1.0). Default: 0.25",
     )
     parser.add_argument(
         "--extra-keyframes",
@@ -157,31 +123,6 @@ def parse_args():
         help="Only process the first N seconds of the video (useful for testing).",
     )
     return parser.parse_args()
-
-
-def parse_color(color_str: str) -> Color:
-    """Parse color string to BGR tuple for OpenCV."""
-
-    normalized = color_str.strip().lower()
-    if normalized in COLOR_MAP:
-        return COLOR_MAP[normalized]
-
-    if normalized.startswith("#") and len(normalized) == 7:
-        r = int(normalized[1:3], 16)
-        g = int(normalized[3:5], 16)
-        b = int(normalized[5:7], 16)
-        return (b, g, r)
-
-    if "," in normalized:
-        parts = [p.strip() for p in normalized.split(",")]
-        if len(parts) == 3:
-            r, g, b = (int(p) for p in parts)
-            if all(0 <= value <= 255 for value in (r, g, b)):
-                return (b, g, r)
-
-    raise ValueError(
-        "Color must be a named color, #RRGGBB hex, or comma-separated R,G,B values"
-    )
 
 
 def load_whitelist_terms(path: Path) -> List[str]:
@@ -229,7 +170,7 @@ def line_matches_whitelist(
     return False
 
 
-def detect_tesseract_line_boxes(
+def detect_tesseract_whitelist_boxes(
     frame: np.ndarray,
     *,
     min_confidence: float,
@@ -286,7 +227,9 @@ def detect_tesseract_line_boxes(
         right = max(rights)
         bottom = max(bottoms)
         line_text = " ".join(texts)
-        keep_line = line_matches_whitelist(line_text, whitelist_terms, whitelist_regexes)
+        keep_line = line_matches_whitelist(
+            line_text, whitelist_terms, whitelist_regexes
+        )
         if verbose:
             status = "[KEEP]" if keep_line else "[REDACT]"
             text_display = line_text.replace("\n", "\\n")
@@ -294,7 +237,7 @@ def detect_tesseract_line_boxes(
                 f"  Line {idx} @ ({left},{top}) {right-left}x{bottom-top}: "
                 f"{status} \"{text_display}\""
             )
-        if keep_line:
+        if not keep_line:
             continue
 
         box = np.array(
@@ -309,7 +252,7 @@ def detect_tesseract_line_boxes(
         boxes.append(box)
 
     if verbose:
-        print(f"Tesseract redacted {len(boxes)} line(s) after whitelisting")
+        print(f"Tesseract kept {len(boxes)} line(s) after whitelisting")
 
     return boxes
 
@@ -375,11 +318,6 @@ def main():
         raise ValueError("--extra-keyframes must be 0 or a positive integer")
     if not (0.0 <= args.tile_overlap < 1.0):
         raise ValueError("--tile-overlap must be >= 0 and < 1")
-    if args.tesseract_full_frame and "--tile-overlap" in sys.argv:
-        raise ValueError(
-            "--tile-overlap is only valid with the OpenCV detector. "
-            "Use --no-tesseract-full-frame to enable it."
-        )
 
     video_path = args.input_path
     cap = cv2.VideoCapture(video_path)
@@ -392,12 +330,9 @@ def main():
 
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fill_color = parse_color(args.color)
     tile_size = tuple(args.tile_size)
     tile_overlap = args.tile_overlap
-    detector = None
-    if not args.tesseract_full_frame:
-        detector = build_detector(tile_size, detector_name=args.detector_name)
+    detector = build_detector(tile_size, detector_name=args.detector_name)
     whitelist_terms_path = Path(__file__).resolve().parent / "whitelist_terms.txt"
     whitelist_regex_path = Path(__file__).resolve().parent / "whitelist_regex.txt"
     whitelist_terms = load_whitelist_terms(whitelist_terms_path)
@@ -436,6 +371,7 @@ def main():
     slot_index: Optional[int] = None
     slot_frames: List[Tuple[np.ndarray, float]] = []
     slot_boxes: Optional[List[Sequence[Sequence[float]]]] = None
+    slot_whitelist_boxes: Optional[List[Sequence[Sequence[float]]]] = None
     slot_sample_time: float = interval / 2
     slot_reference_timestamp: Optional[float] = None
     last_percent_bucket = -1
@@ -443,26 +379,125 @@ def main():
     percent_step = 5
     slot_queue: Deque[SlotBufferEntry] = deque()
     coverage_map: DefaultDict[int, List[Sequence[Sequence[float]]]] = defaultdict(list)
+    whitelist_map: DefaultDict[int, List[Sequence[Sequence[float]]]] = defaultdict(list)
     highest_finalized_slot: Optional[int] = None
 
-    def detect_boxes(frame):
-        if args.tesseract_full_frame:
-            return detect_tesseract_line_boxes(
-                frame,
-                min_confidence=args.tesseract_min_conf,
-                whitelist_terms=whitelist_terms,
-                whitelist_regexes=whitelist_regexes,
-                verbose=args.verbose,
-            )
+    def detect_opencv_boxes(frame):
+        detection_frame = preprocess_for_text_detection(frame)
         boxes = detect_text_with_tiling(
-            detector, frame, tile_size, overlap=tile_overlap
+            detector, detection_frame, tile_size, overlap=tile_overlap
         )
         if args.verbose:
             print(f"Detected {len(boxes)} text box(es)")
         return boxes
 
+    def detect_whitelist_boxes(frame):
+        return detect_tesseract_whitelist_boxes(
+            frame,
+            min_confidence=args.tesseract_min_conf,
+            whitelist_terms=whitelist_terms,
+            whitelist_regexes=whitelist_regexes,
+            verbose=args.verbose,
+        )
+
+    def restore_boxes(
+        boxes: List[Sequence[Sequence[float]]],
+        source_frame: np.ndarray,
+        target_frame: np.ndarray,
+    ) -> None:
+        for box in boxes:
+            points = np.array(box, np.int32)
+            x, y, w, h = cv2.boundingRect(points)
+            if w <= 0 or h <= 0:
+                continue
+            target_frame[y : y + h, x : x + w] = source_frame[
+                y : y + h, x : x + w
+            ]
+
+    def rect_from_box(box: Sequence[Sequence[float]]) -> Tuple[int, int, int, int]:
+        points = np.array(box, np.int32)
+        x, y, w, h = cv2.boundingRect(points)
+        return (x, y, w, h)
+
+    def intersection_rect(
+        a: Tuple[int, int, int, int],
+        b: Tuple[int, int, int, int],
+    ) -> Optional[Tuple[int, int, int, int]]:
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        left = max(ax, bx)
+        top = max(ay, by)
+        right = min(ax + aw, bx + bw)
+        bottom = min(ay + ah, by + bh)
+        w = right - left
+        h = bottom - top
+        if w <= 0 or h <= 0:
+            return None
+        return (left, top, w, h)
+
+    def union_area(rects: List[Tuple[int, int, int, int]]) -> int:
+        if not rects:
+            return 0
+        x_coords = set()
+        for x, y, w, h in rects:
+            x_coords.add(x)
+            x_coords.add(x + w)
+        xs = sorted(x_coords)
+        area = 0
+        for i in range(len(xs) - 1):
+            x_left = xs[i]
+            x_right = xs[i + 1]
+            if x_right <= x_left:
+                continue
+            y_intervals = []
+            for x, y, w, h in rects:
+                if x <= x_left and (x + w) >= x_right:
+                    y_intervals.append((y, y + h))
+            if not y_intervals:
+                continue
+            y_intervals.sort()
+            merged = []
+            cur_start, cur_end = y_intervals[0]
+            for start, end in y_intervals[1:]:
+                if start <= cur_end:
+                    cur_end = max(cur_end, end)
+                else:
+                    merged.append((cur_start, cur_end))
+                    cur_start, cur_end = start, end
+            merged.append((cur_start, cur_end))
+            covered_y = sum(end - start for start, end in merged)
+            area += (x_right - x_left) * covered_y
+        return area
+
+    def filter_opencv_boxes(
+        opencv_boxes: List[Sequence[Sequence[float]]],
+        whitelist_boxes: List[Sequence[Sequence[float]]],
+        coverage_threshold: float = 0.9,
+    ) -> List[Sequence[Sequence[float]]]:
+        if not opencv_boxes or not whitelist_boxes:
+            return opencv_boxes
+        whitelist_rects = [rect_from_box(box) for box in whitelist_boxes]
+        kept = []
+        for box in opencv_boxes:
+            rect = rect_from_box(box)
+            _, _, w, h = rect
+            if w <= 0 or h <= 0:
+                continue
+            intersections = []
+            for wrect in whitelist_rects:
+                intersect = intersection_rect(rect, wrect)
+                if intersect is not None:
+                    intersections.append(intersect)
+            if not intersections:
+                kept.append(box)
+                continue
+            covered = union_area(intersections)
+            if covered < coverage_threshold * (w * h):
+                kept.append(box)
+        return kept
+
     def flush_ready_slots(force: bool = False):
-        nonlocal slot_queue, coverage_map, highest_finalized_slot
+        nonlocal slot_queue, coverage_map, whitelist_map, highest_finalized_slot
         if not slot_queue:
             return
 
@@ -478,41 +513,47 @@ def main():
             slot_idx = slot_entry["index"]
             frames_only = slot_entry["frames"]
             combined_boxes = coverage_map.pop(slot_idx, [])
+            combined_whitelist_boxes = whitelist_map.pop(slot_idx, [])
+            if combined_boxes and combined_whitelist_boxes:
+                combined_boxes = filter_opencv_boxes(
+                    combined_boxes, combined_whitelist_boxes, coverage_threshold=0.9
+                )
 
             for frame in frames_only:
                 output_frame = frame.copy()
                 if combined_boxes:
-                    if args.tesseract_full_frame:
-                        draw_boxes(
-                            combined_boxes,
-                            output_frame,
-                            COLOR_MAP["red"],
-                            True,
-                            outline_thickness=1,
-                        )
-                    else:
-                        draw_boxes(
-                            combined_boxes, output_frame, fill_color, args.outline
-                        )
+                    draw_boxes(combined_boxes, output_frame, (0, 0, 0), False)
+                if combined_whitelist_boxes:
+                    restore_boxes(combined_whitelist_boxes, frame, output_frame)
                 writer.write(output_frame)
 
     def finalize_slot(sample_time: float):
-        nonlocal slot_frames, slot_boxes, slot_reference_timestamp, highest_finalized_slot, slot_queue
+        nonlocal slot_frames
+        nonlocal slot_boxes
+        nonlocal slot_whitelist_boxes
+        nonlocal slot_reference_timestamp
+        nonlocal highest_finalized_slot
+        nonlocal slot_queue
         if not slot_frames:
             return
 
         boxes = slot_boxes
+        whitelist_boxes = slot_whitelist_boxes
         reference_time = slot_reference_timestamp
 
-        if boxes is None:
+        if boxes is None or whitelist_boxes is None:
             # Fall back to the frame closest to the intended midpoint.
             sample_frame, reference_time = min(
                 slot_frames, key=lambda item: abs(item[1] - sample_time)
             )
-            boxes = detect_boxes(sample_frame)
+            boxes = detect_opencv_boxes(sample_frame)
+            whitelist_boxes = detect_whitelist_boxes(sample_frame)
             slot_reference_timestamp = reference_time
             if args.verbose:
-                print(f"Keyframe (fallback) at {reference_time:.2f}s: detected {len(boxes)} boxes")
+                print(
+                    f"Keyframe (fallback) at {reference_time:.2f}s: "
+                    f"OpenCV {len(boxes)} box(es), whitelist {len(whitelist_boxes)} line(s)"
+                )
 
         slot_queue.append(
             {"index": slot_index, "frames": [frame for frame, _ in slot_frames]}
@@ -524,15 +565,23 @@ def main():
                 if target_slot < 0:
                     continue
                 coverage_map[target_slot].extend(boxes)
+        if whitelist_boxes:
+            for offset in range(-args.extra_keyframes, args.extra_keyframes + 1):
+                target_slot = slot_index + offset
+                if target_slot < 0:
+                    continue
+                whitelist_map[target_slot].extend(whitelist_boxes)
 
         frame_count = len(slot_frames)
         detection_count = len(boxes) if boxes else 0
+        whitelist_count = len(whitelist_boxes) if whitelist_boxes else 0
         reference_desc = (
             f"{reference_time:.2f}s" if reference_time is not None else "unknown time"
         )
         print(
             f"Processed slot {slot_index} ({frame_count} frames) "
-            f"using reference at {reference_desc} with {detection_count} boxes"
+            f"using reference at {reference_desc} with {detection_count} boxes, "
+            f"{whitelist_count} whitelisted line(s)"
         )
 
         highest_finalized_slot = slot_index
@@ -540,6 +589,7 @@ def main():
 
         slot_frames = []
         slot_boxes = None
+        slot_whitelist_boxes = None
         slot_reference_timestamp = None
 
     frame_duration = 1.0 / fps
@@ -584,10 +634,14 @@ def main():
             slot_frames.append((frame.copy(), timestamp))
 
             if slot_boxes is None and timestamp >= slot_sample_time:
-                slot_boxes = detect_boxes(frame)
+                slot_boxes = detect_opencv_boxes(frame)
+                slot_whitelist_boxes = detect_whitelist_boxes(frame)
                 slot_reference_timestamp = timestamp
                 if args.verbose:
-                    print(f"Keyframe at {timestamp:.2f}s: detected {len(slot_boxes)} boxes")
+                    print(
+                        f"Keyframe at {timestamp:.2f}s: OpenCV {len(slot_boxes)} box(es), "
+                        f"whitelist {len(slot_whitelist_boxes)} line(s)"
+                    )
 
         # Flush the final slot and any buffered slots still awaiting future detections
         finalize_slot(slot_sample_time)

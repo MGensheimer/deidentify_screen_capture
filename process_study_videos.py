@@ -39,11 +39,11 @@ def build_command(input_filepath, output_filepath, first_name, last_name):
         "-o", output_filepath,
         "--interval", "4",
         "--extra-keyframes", "8",
-        "--target-bitrate", "1000k",
-        "-p", first_name,
-        "-p", last_name,
-        "--redact_dates_times",
-        "--redact_digits", "6",
+        "--target-bitrate", "1000k"
+        #"-p", first_name,
+        #"-p", last_name,
+        #"--redact_dates_times",
+        #"--redact_digits", "6",
         #"--verbose",
         #"--only_first_seconds", "20"
     ]

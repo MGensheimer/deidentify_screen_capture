@@ -127,7 +127,7 @@ def main():
 
     fill_color = parse_color(args.color)
 
-    input_size = (320, 320)
+    input_size = (736, 736)
     tile_w, tile_h = input_size
     overlap = args.tile_overlap
     step_w = max(1, int(round(tile_w * (1.0 - overlap))))

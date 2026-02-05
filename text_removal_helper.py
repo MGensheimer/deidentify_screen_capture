@@ -9,17 +9,35 @@ import numpy as np
 import pytesseract
 
 
-# Config flag to choose which detector to run: "DB18" or "EAST"
-DETECTOR = "DB18"
+# Config flag to choose which detector to run: "DB50", "DB18", or "EAST"
+DETECTOR = "DB50"
 
 
 Color = Tuple[int, int, int]
 
 
+def preprocess_for_text_detection(image: np.ndarray) -> np.ndarray:
+    """Normalize contrast to improve text detection on dark images."""
+    if image is None or image.size == 0:
+        return image
+
+    # Apply CLAHE to boost local contrast without blowing out highlights.
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+    if len(image.shape) == 2 or image.shape[2] == 1:
+        return clahe.apply(image)
+
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = clahe.apply(l)
+    lab = cv2.merge((l, a, b))
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+
 def build_detector(input_size: Tuple[int, int], detector_name: str = DETECTOR):
     detector_name = detector_name.upper()
-    if detector_name not in {"DB18", "EAST"}:
-        raise ValueError("detector_name must be either 'DB18' or 'EAST'")
+    if detector_name not in {"DB50", "DB18", "EAST"}:
+        raise ValueError("detector_name must be either 'DB50', 'DB18', or 'EAST'")
 
     if detector_name == "EAST":
         model = cv2.dnn_TextDetectionModel_EAST(
@@ -30,9 +48,14 @@ def build_detector(input_size: Tuple[int, int], detector_name: str = DETECTOR):
         model.setConfidenceThreshold(conf_thresh).setNMSThreshold(nms_thresh)
         model.setInputParams(1.0, input_size, (123.68, 116.78, 103.94), True)
     else:
-        model = cv2.dnn_TextDetectionModel_DB("weights/DB_TD500_resnet18.onnx")
-        bin_thresh = 0.3
-        poly_thresh = 0.5
+        if detector_name == "DB50":
+            model_path = "weights/DB_TD500_resnet50.onnx"
+        else:
+            model_path = "weights/DB_TD500_resnet18.onnx"
+
+        model = cv2.dnn_TextDetectionModel_DB(model_path)
+        bin_thresh = 0.2
+        poly_thresh = 0.4
         mean = (122.67891434, 116.66876762, 104.00698793)
         model.setBinaryThreshold(bin_thresh).setPolygonThreshold(poly_thresh)
         model.setInputParams(1.0 / 255, input_size, mean, True)
@@ -304,7 +327,7 @@ def remove_text_in_memory(
     redact_dates_times: bool = False,
     redact_min_digits: int | None = None,
     verbose: bool = False,
-    input_size: Tuple[int, int] = (320, 320),
+    input_size: Tuple[int, int] = (736, 736),
     tile_overlap: float = 0.0,
     detector_name: str = DETECTOR,
     detector=None,
@@ -322,8 +345,9 @@ def remove_text_in_memory(
         raise ValueError("image cannot be None")
 
     local_detector = detector or build_detector(input_size, detector_name=detector_name)
+    detection_image = preprocess_for_text_detection(image)
     boxes = detect_text_with_tiling(
-        local_detector, image, input_size, overlap=tile_overlap
+        local_detector, detection_image, input_size, overlap=tile_overlap
     )
     
     if verbose:
