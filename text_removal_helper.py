@@ -230,6 +230,7 @@ def draw_boxes(
     canvas: np.ndarray,
     color: Color,
     outline_only: bool,
+    outline_thickness: int = 2,
     redact_phrases: list[str] | None = None,
     redact_dates_times: bool = False,
     redact_min_digits: int | None = None,
@@ -244,7 +245,7 @@ def draw_boxes(
     
     If verbose is True, prints OCR'd text from each detected text box.
     """
-    thickness = 2 if outline_only else -1
+    thickness = outline_thickness if outline_only else -1
     has_filters = redact_phrases or redact_dates_times or redact_min_digits is not None
     
     for i, box in enumerate(boxes):
@@ -334,6 +335,7 @@ def remove_text_in_memory(
         output_image,
         fill_color,
         outline_only,
+        outline_thickness=2,
         redact_phrases=redact_phrases,
         redact_dates_times=redact_dates_times,
         redact_min_digits=redact_min_digits,

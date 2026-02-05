@@ -14,6 +14,7 @@ import sys
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, DefaultDict, Deque, Dict, List, Optional, Sequence, Tuple
+import re
 
 import cv2
 import numpy as np
@@ -25,8 +26,6 @@ from text_removal_helper import (
     build_detector,
     detect_text_with_tiling,
     draw_boxes,
-    ocr_region,
-    should_redact_box,
 )
 
 
@@ -145,29 +144,6 @@ def parse_args():
         help="Explicit ffmpeg bitrate string (e.g., 1500k) used for recompression.",
     )
     parser.add_argument(
-        "-p",
-        "--phrase",
-        dest="phrases",
-        action="append",
-        default=None,
-        help="Phrase to redact (can be used multiple times). Matching is case-insensitive "
-             "and ignores spaces/punctuation. Only matching text boxes are redacted; "
-             "non-matching boxes are left untouched.",
-    )
-    parser.add_argument(
-        "--redact_dates_times",
-        action="store_true",
-        help="Redact all dates and times (e.g., YYYY-MM-DD, MM/DD/YYYY, 11:23, 7:11 AM, etc.)",
-    )
-    parser.add_argument(
-        "--redact_digits",
-        type=int,
-        metavar="N",
-        default=None,
-        help="Redact text boxes containing at least N consecutive digits "
-             "(spaces/punctuation are ignored when counting).",
-    )
-    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -208,61 +184,57 @@ def parse_color(color_str: str) -> Color:
     )
 
 
-def filter_boxes_with_ocr(
-    boxes: List[np.ndarray],
-    frame: np.ndarray,
-    redact_phrases: Optional[List[str]],
-    redact_dates_times: bool,
-    redact_min_digits: Optional[int],
-    verbose: bool,
-) -> List[np.ndarray]:
-    """Filter detected boxes using OCR, keeping only those matching redaction criteria.
-    
-    This runs OCR on each detected box and returns only the boxes that should be
-    redacted based on the filtering criteria (phrases, dates/times, digit count).
-    
-    If no filtering criteria are active, returns all boxes unchanged.
-    """
-    has_filters = redact_phrases or redact_dates_times or redact_min_digits is not None
-    
-    if not has_filters:
-        # No filtering - return all boxes
-        if verbose:
-            print(f"  No OCR filters active, keeping all {len(boxes)} boxes")
-        return boxes
-    
-    filtered_boxes = []
-    
-    for i, box in enumerate(boxes):
-        points = np.array(box, np.int32)
-        x, y, w, h = cv2.boundingRect(points)
-        
-        # OCR the region
-        text = ocr_region(frame, x, y, w, h)
-        
-        # Check if it matches redaction criteria
-        should_redact = should_redact_box(
-            text, redact_phrases, redact_dates_times, redact_min_digits
-        )
-        
-        if verbose:
-            status = "[REDACT]" if should_redact else "[skip]"
-            text_display = text.replace('\n', '\\n')
-            print(f"  Box {i+1} @ ({x},{y}) {w}x{h}: {status} \"{text_display}\"")
-        
-        if should_redact:
-            filtered_boxes.append(box)
-    
-    return filtered_boxes
+def load_whitelist_terms(path: Path) -> List[str]:
+    if not path.exists():
+        raise FileNotFoundError(f"Whitelist terms file not found: {path}")
+    terms: List[str] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            terms.append(text.lstrip("\ufeff"))
+    return terms
+
+
+def load_whitelist_regexes(path: Path) -> List[re.Pattern]:
+    if not path.exists():
+        raise FileNotFoundError(f"Whitelist regex file not found: {path}")
+    patterns: List[re.Pattern] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                patterns.append(re.compile(text))
+            except re.error as exc:
+                raise ValueError(f"Invalid regex in {path}: {text}") from exc
+    return patterns
+
+
+def line_matches_whitelist(
+    line_text: str,
+    terms: List[str],
+    regexes: List[re.Pattern],
+) -> bool:
+    if len(line_text) <= 3:
+        return True
+    for term in terms:
+        if term in line_text:
+            return True
+    for pattern in regexes:
+        if pattern.search(line_text):
+            return True
+    return False
 
 
 def detect_tesseract_line_boxes(
     frame: np.ndarray,
     *,
     min_confidence: float,
-    redact_phrases: Optional[List[str]],
-    redact_dates_times: bool,
-    redact_min_digits: Optional[int],
+    whitelist_terms: List[str],
+    whitelist_regexes: List[re.Pattern],
     verbose: bool,
 ) -> List[np.ndarray]:
     """Run Tesseract on a full frame and return line-level boxes."""
@@ -301,7 +273,6 @@ def detect_tesseract_line_boxes(
     if verbose:
         print(f"Tesseract detected {len(lines)} line(s)")
 
-    has_filters = redact_phrases or redact_dates_times or redact_min_digits is not None
     boxes: List[np.ndarray] = []
 
     for idx, items in enumerate(lines.values(), start=1):
@@ -315,26 +286,16 @@ def detect_tesseract_line_boxes(
         right = max(rights)
         bottom = max(bottoms)
         line_text = " ".join(texts)
-
-        if has_filters:
-            should_redact = should_redact_box(
-                line_text, redact_phrases, redact_dates_times, redact_min_digits
-            )
-            if verbose:
-                status = "[REDACT]" if should_redact else "[skip]"
-                text_display = line_text.replace("\n", "\\n")
-                print(
-                    f"  Line {idx} @ ({left},{top}) {right-left}x{bottom-top}: "
-                    f"{status} \"{text_display}\""
-                )
-            if not should_redact:
-                continue
-        elif verbose:
+        keep_line = line_matches_whitelist(line_text, whitelist_terms, whitelist_regexes)
+        if verbose:
+            status = "[KEEP]" if keep_line else "[REDACT]"
             text_display = line_text.replace("\n", "\\n")
             print(
                 f"  Line {idx} @ ({left},{top}) {right-left}x{bottom-top}: "
-                f"\"{text_display}\""
+                f"{status} \"{text_display}\""
             )
+        if keep_line:
+            continue
 
         box = np.array(
             [
@@ -347,8 +308,8 @@ def detect_tesseract_line_boxes(
         )
         boxes.append(box)
 
-    if verbose and has_filters:
-        print(f"Tesseract kept {len(boxes)} line(s) after filtering")
+    if verbose:
+        print(f"Tesseract redacted {len(boxes)} line(s) after whitelisting")
 
     return boxes
 
@@ -437,6 +398,10 @@ def main():
     detector = None
     if not args.tesseract_full_frame:
         detector = build_detector(tile_size, detector_name=args.detector_name)
+    whitelist_terms_path = Path(__file__).resolve().parent / "whitelist_terms.txt"
+    whitelist_regex_path = Path(__file__).resolve().parent / "whitelist_regex.txt"
+    whitelist_terms = load_whitelist_terms(whitelist_terms_path)
+    whitelist_regexes = load_whitelist_regexes(whitelist_regex_path)
 
     os.makedirs("output", exist_ok=True)
     default_name = "output_video.mp4"
@@ -485,9 +450,8 @@ def main():
             return detect_tesseract_line_boxes(
                 frame,
                 min_confidence=args.tesseract_min_conf,
-                redact_phrases=args.phrases,
-                redact_dates_times=args.redact_dates_times,
-                redact_min_digits=args.redact_digits,
+                whitelist_terms=whitelist_terms,
+                whitelist_regexes=whitelist_regexes,
                 verbose=args.verbose,
             )
         boxes = detect_text_with_tiling(
@@ -495,14 +459,7 @@ def main():
         )
         if args.verbose:
             print(f"Detected {len(boxes)} text box(es)")
-        return filter_boxes_with_ocr(
-            boxes,
-            frame,
-            args.phrases,
-            args.redact_dates_times,
-            args.redact_digits,
-            args.verbose,
-        )
+        return boxes
 
     def flush_ready_slots(force: bool = False):
         nonlocal slot_queue, coverage_map, highest_finalized_slot
@@ -525,7 +482,18 @@ def main():
             for frame in frames_only:
                 output_frame = frame.copy()
                 if combined_boxes:
-                    draw_boxes(combined_boxes, output_frame, fill_color, args.outline)
+                    if args.tesseract_full_frame:
+                        draw_boxes(
+                            combined_boxes,
+                            output_frame,
+                            COLOR_MAP["red"],
+                            True,
+                            outline_thickness=1,
+                        )
+                    else:
+                        draw_boxes(
+                            combined_boxes, output_frame, fill_color, args.outline
+                        )
                 writer.write(output_frame)
 
     def finalize_slot(sample_time: float):

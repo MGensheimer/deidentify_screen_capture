@@ -1,4 +1,15 @@
-﻿GTVp
+﻿Move
+2D
+Brush
+Copy
+Threshold
+Region
+Grow
+Whole
+Body
+PET
+Contours
+GTVp
 GTVn
 CTV
 PTV
