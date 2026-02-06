@@ -1,89 +1,148 @@
-# Remove protected health information (PHI) from screen capture videos
+# Deidentify Screen Capture Media (PHI Redaction)
 
 Author: Michael Gensheimer (michael.gensheimer@gmail.com) and Codex CLI.
 
-Text block removal from images was adapted from [this OpenCV tutorial](https://opencv.org/blog/text-detection-and-removal-using-opencv/).
+Text block removal with OpenCV was adapted from [this OpenCV tutorial](https://opencv.org/blog/text-detection-and-removal-using-opencv/).
 
-## About
+## What This Repo Does
 
-Use this repository to remove protected health information (PHI) such as patient name, ID, dates, etc. from screen capture videos. Text in the video is replaced by black boxes, and audio is replaced with a subtitles file that contains the transcript with any PHI removed.
+This repo removes on-screen PHI from images/videos and can deidentify subtitle text.
+
+- Image redaction with OpenCV: `remove_text_from_image.py`
+- Video redaction with OpenCV + whitelist protection: `remove_text_from_video.py`
+- Image redaction with PaddleOCR + whitelist protection: `remove_text_from_image_paddleocr.py`
+- Video redaction with PaddleOCR + whitelist protection: `remove_text_from_video_paddleocr.py`
+- Subtitle deidentification (Ollama or Gemini): `deidentify_subtitles.py`
 
 Sample output:
 
 ![Sample output](sample_output.jpg)
 
-Note that large text blocks have been redacted but some small text snippets are still visible. _The process is not 100% reliable so continue to assume there is PHI in the output!_
+The process is not 100% reliable. Continue treating output as potentially containing PHI.
 
-## Prerequisites (tested on Mac but should work on other platforms)
+## Prerequisites
 
-- uv package manager
-- ffmpeg
-- Tesseract OCR (required for selective redaction features; install with `brew install tesseract` on Mac)
-- Ollama with gemma3 model installed (4b version is smart enough and runs smoothly on Mac)
-- A transcription tool that can make a .srt subtitles file. Mac Whisper Pro with Parakeet v3 model is good, it is able to separate the different speakers. Or can try FFTrans Parakeet which is free, but I found the quality to be lower.
+Required for core scripts:
 
-## Steps
+- `uv`
+- `ffmpeg` (for video recompression in scripts that use `--target-bitrate`)
+- Python deps from `pyproject.toml` (installed via `uv` workflow)
 
-1. Make subtitles file from the video file
+Needed for specific workflows:
 
-Use a transcription tool to make a .srt subtitles file (see Prerequisites).
+- `pytesseract` + system Tesseract install for OpenCV helper workflows that OCR text
+- `paddleocr` for Paddle scripts (intentionally not installed by default in this repo)
+- `ollama` model runtime for local subtitle deidentification
+- Google Vertex AI access for `deidentify_subtitles.py --use-gemini`
 
-2. Deidentify the subtitles file (removes patient names, IDs, dates, etc.)
+## Whitelist Files
 
-`uv run deidentify_subtitles.py -i subtitles.srt -o subtitles_deid.srt`
+- `whitelist_terms.txt`
+- `whitelist_regex.txt`
 
-If you prefer to call Google Vertex AI Gemini instead of a local Ollama model, supply your Vertex AI project and add `--use-gemini`:
+When whitelist matching is enabled by a script, detected text boxes matching either file are preserved (not blacked out).
 
-`uv run deidentify_subtitles.py -i subtitles.srt -o subtitles_deid.srt --use-gemini --google-project YOUR_PROJECT`
+Current whitelist usage:
 
-The tool uses the `gemini-2.5-flash-lite` model by default; adjust `--google-location` or `--google-model` if your deployment needs different settings.
+- `remove_text_from_video.py`: uses whitelist files
+- `remove_text_from_image_paddleocr.py`: uses whitelist files
+- `remove_text_from_video_paddleocr.py`: uses whitelist files
+- `remove_text_from_image.py`: does not use whitelist files
 
-3. Remove audio and on-screen text from the video
+Matching behavior is case-sensitive substring/regex matching in script logic. Very short OCR text (length `<= 3`) is treated as keep.
 
-`uv run remove_text_from_video.py -i recording.mp4 -o recording_no_text.mp4 --interval 2 --extra-keyframes 1 --target-bitrate 1500k`
+## Quick Start
 
-This will find any letters/numbers in the video and change them to black boxes. I recommend keeping interval and extra-keyframes this way but you can try different values.
-By default, detection runs Tesseract on each keyframe to produce line-level boxes. To use the OpenCV detector instead, pass `--no-tesseract-full-frame` (this path is quite slow).
+### OpenCV Image Redaction
 
-### Selective redaction with OCR
+```bash
+uv run remove_text_from_image.py -i input/tps.jpeg -o output/output_image_db.png
+```
 
-Instead of redacting all text, you can use OCR to selectively redact only specific content. This is useful when you want to preserve some on-screen text while removing PHI.
+Useful flags:
 
-**Redact specific phrases** (case-insensitive, ignores spaces/punctuation):
+- `-c/--color` fill color (default `black`)
+- `--outline` draw outlines only
+- `--tile-overlap` default `0.5`
+- `-p/--phrase` redact only boxes matching phrase(s)
+- `--redact_dates_times`
+- `--redact_digits N`
+- `-v/--verbose`
 
-`uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 -p "John Smith" -p "Patient Name"`
+### OpenCV Video Redaction (with whitelist protection)
 
-**Redact dates and times** (various formats like YYYY-MM-DD, MM/DD/YYYY, 11:23 AM, etc.):
+```bash
+uv run remove_text_from_video.py \
+  -i input/test_recording.mov \
+  -o output/output_video_opencv.mp4 \
+  --interval 2 \
+  --extra-keyframes 1 \
+  --target-bitrate 1500k
+```
 
-`uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 --redact_dates_times`
+Useful flags:
 
-**Redact long numbers** (e.g., patient IDs, phone numbers with 7+ digits):
+- `--interval` seconds between keyframe detections
+- `--extra-keyframes` propagate detections to adjacent slots
+- `--target-bitrate` ffmpeg bitrate string
+- `--only_first_seconds N` test on first N seconds
+- `--tile WIDTH HEIGHT`
+- `--tile-overlap`
+- `--detector {DB50,DB18,EAST}`
+- `--tesseract-min-conf`
+- `-v/--verbose`
 
-`uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 --redact_digits 7`
+### PaddleOCR Image Redaction (with whitelist protection)
 
-**Combine multiple filters:**
+```bash
+uv run remove_text_from_image_paddleocr.py \
+  -i input/tps.jpeg \
+  -o output/output_image_paddleocr.png
+```
 
-`uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 --redact_dates_times --redact_digits 5 -p "Confidential"`
+### PaddleOCR Video Redaction (with whitelist protection)
 
-Use `-v` (verbose) to see what text is being detected and redacted on each keyframe—helpful for debugging.
-If you need to tune OCR sensitivity, lower `--tesseract-min-conf` (default: -1 keeps all non-empty text).
+```bash
+uv run remove_text_from_video_paddleocr.py \
+  -i input/test_recording.mov \
+  -o output/output_video_paddleocr.mp4 \
+  --interval 2 \
+  --extra-keyframes 1 \
+  --target-bitrate 1500k
+```
 
-### Tiling overlap
+Useful flags:
 
-Large images and video frames are processed in tiles for speed when using the OpenCV detector. In that mode, OpenCV first finds text bounding boxes, then each box is OCR’d with Tesseract (slower than full-frame Tesseract, but can yield slightly higher quality). To avoid missing text that spans tile boundaries, the detector runs on overlapping tiles by default (50% overlap). You can change this with `--tile-overlap`, for example:
+- `--interval`
+- `--extra-keyframes`
+- `--target-bitrate`
+- `--only_first_seconds N`
+- `-v/--verbose`
 
-`uv run remove_text_from_video.py -i recording.mp4 -o output.mp4 --tile-overlap 0.25`
+## Subtitle Deidentification
 
-The same flag is available for images:
+Basic (local Ollama):
 
-`uv run remove_text_from_image.py -i input/tps.jpeg -o output/output_image.png --tile-overlap 0.25`
+```bash
+uv run deidentify_subtitles.py -i input.srt -o output_cleaned.srt
+```
 
-### Testing with a short clip
+Gemini (Vertex AI):
 
-Use `--only_first_seconds` to process only the beginning of a video, which is useful for testing settings:
+```bash
+uv run deidentify_subtitles.py \
+  -i input.srt \
+  -o output_cleaned.srt \
+  --use-gemini \
+  --google-project YOUR_PROJECT
+```
 
-`uv run remove_text_from_video.py -i recording.mp4 -o test_output.mp4 --redact_dates_times -v --only_first_seconds 10`
+## Batch Processing Script
 
-## Result
+`process_study_videos.py` is a project-specific batch runner tied to local filesystem paths in that script. Update constants before use in another environment.
 
-The result is a video file with the audio and on-screen text removed, and a subtitle file with the transcription. Name the .srt file with the same name as the video (as in, video.mp4 and video.srt). You can test out the finished product by loading the video in VLC and turning subtitles on.
+## Notes
+
+- Default `uv run ...` execution is expected for all scripts.
+- Video scripts remove audio when re-encoding with ffmpeg in current implementation (`-an`).
+- For quick test cycles on videos, use `--only_first_seconds`.
