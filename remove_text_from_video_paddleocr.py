@@ -134,7 +134,7 @@ def line_matches_whitelist(text: str, terms: list[str], regexes: list[re.Pattern
     if len(text) <= 3:
         return True
     for term in terms:
-        if term in text:
+        if term in text and (2 * len(term) >= len(text)):
             return True
     for pattern in regexes:
         if pattern.search(text):

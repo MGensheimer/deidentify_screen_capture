@@ -141,6 +141,20 @@ uv run deidentify_subtitles.py \
 
 `process_study_videos.py` is a project-specific batch runner tied to local filesystem paths in that script. Update constants before use in another environment.
 
+Generic PaddleOCR batch runner for local `input/` -> `output/` workflows:
+
+```bash
+uv run batch_remove_text_from_video_paddleocr.py --max-videos 5
+```
+
+- Processes every `.mp4` and `.mov` file in `input/`
+- Writes to `output/` with `_deid` suffix (example: `video1.mp4` -> `video1_deid.mp4`)
+- Skips files whose target output already exists
+- Uses fixed settings:
+  - `--interval 4`
+  - `--extra-keyframes 2`
+  - `--target-bitrate 1000k`
+
 ## Notes
 
 - Default `uv run ...` execution is expected for all scripts.
