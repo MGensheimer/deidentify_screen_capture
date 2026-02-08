@@ -12,3 +12,5 @@ weights/
 temp.txt
 temp_output.txt
 scrap.py
+.env
+.env.local

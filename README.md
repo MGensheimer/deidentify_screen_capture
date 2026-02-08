@@ -97,6 +97,13 @@ uv run deidentify_subtitles.py \
   --google-project YOUR_PROJECT
 ```
 
+For `process_study_videos.py`, set your project in a local `.env` file (not tracked):
+
+```bash
+cp .env.example .env
+# then edit .env and set GOOGLE_PROJECT
+```
+
 ## Batch Processing
 
 Project-specific post-processing script:

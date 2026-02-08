@@ -25,6 +25,7 @@ import argparse
 import os
 import subprocess
 import shutil
+from pathlib import Path
 
 import pandas as pd
 from termcolor import colored
@@ -33,6 +34,24 @@ PHI_VIDEOS_DIR = "/Users/michael/Box Sync/Michael Gensheimer's Files/research/le
 DEID_VIDEOS_READY_FOR_RENAME_DIR = "/Users/michael/Box Sync/Michael Gensheimer's Files/research/lesion ident segment/data/recordings/ID Recordings/deid_ready_for_rename"
 DEID_VIDEOS_DIR = "/Users/michael/Box Sync/Michael Gensheimer's Files/research/lesion ident segment/data/recordings/deid_recordings"
 PATIENTS_CSV = "/Users/michael/Box Sync/Michael Gensheimer's Files/research/lesion ident segment/data/recordings/patients.csv"
+
+
+def load_local_env(env_path=None):
+    """Load simple KEY=VALUE pairs from a local .env into os.environ."""
+    if env_path is None:
+        env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def parse_args():
@@ -53,14 +72,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_subtitle_command(input_filepath, output_filepath):
+def build_subtitle_command(input_filepath, output_filepath, google_project):
     """Build the command to de-identify subtitles."""
     return [
         "uv", "run", "deidentify_subtitles.py",
         "-i", input_filepath,
         "-o", output_filepath,
         "--use-gemini",
-        "--google-project", "som-nero-phi-mgens-starr",
+        "--google-project", google_project,
     ]
 
 
@@ -86,7 +105,16 @@ def find_ready_video(ready_dir, source_filename):
 
 
 def main():
+    load_local_env()
     args = parse_args()
+    google_project = os.getenv("GOOGLE_PROJECT")
+    if not google_project:
+        print(colored(
+            "Error: GOOGLE_PROJECT is not set. Add GOOGLE_PROJECT to your local "
+            ".env file (repo root) or export it in your shell.",
+            "yellow",
+        ))
+        return
     
     try:
         patients = pd.read_csv(PATIENTS_CSV)
@@ -166,7 +194,9 @@ def main():
         output_filepath = os.path.join(DEID_VIDEOS_DIR, f"{anon_part}.mp4")
         output_srt_filepath = os.path.join(DEID_VIDEOS_DIR, f"{anon_part}.srt")
         
-        subtitle_cmd = build_subtitle_command(srt_input_filepath, output_srt_filepath)
+        subtitle_cmd = build_subtitle_command(
+            srt_input_filepath, output_srt_filepath, google_project
+        )
         output_video_exists = os.path.exists(output_filepath)
         ready_video_path = None
         if not output_video_exists and os.path.isdir(DEID_VIDEOS_READY_FOR_RENAME_DIR):
