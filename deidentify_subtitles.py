@@ -1,4 +1,4 @@
-"""Deidentify SRT subtitle files by redacting sensitive text via Ollama or Gemini."""
+"""Deidentify SRT/VTT subtitle files by redacting sensitive text via Ollama or Gemini."""
 
 from __future__ import annotations
 
@@ -18,20 +18,22 @@ except ImportError:  # pragma: no cover - surfaced at runtime when Gemini option
 
 DEFAULT_PROMPT_TEMPLATE = (
     "Please return the following text, replacing any patient identifiers (names, IDs, dates, etc.) with [redacted identifier]. "
-    "For numbers, only redact patient IDs and dates. Don't redact other numbers such as radiation dose levels. For names, only redact patient names, not doctor, software, or other names."
+    "For numbers, only redact patient IDs and dates. Don't redact other numbers such as radiation dose levels. For names, only redact patient names, not doctor, software, or other names. The speakers in the transcript are never patients, so speaker names should be preserved."
     "Return ONLY the deidentified text, no other text or explanations. Some situations will be ambigious; use your best judgment. Here is the text to clean: '{text}'"
 )
 
-TIME_PATTERN = re.compile(
-    r"(?P<start>\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(?P<end>\d{2}:\d{2}:\d{2},\d{3})"
+SRT_TIME_PATTERN = re.compile(
+    r"\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}"
+)
+VTT_TIME_PATTERN = re.compile(
+    r"\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}(?:\s+.*)?"
 )
 
 
 @dataclass
-class SRTEntry:
-    index: int
-    start: str
-    end: str
+class SubtitleEntry:
+    cue_id: str | None
+    time_line: str
     text_lines: List[str]
 
     def text_block(self) -> str:
@@ -40,21 +42,23 @@ class SRTEntry:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Remove patient identifiers from an SRT file via Ollama or Gemini."
+        description=(
+            "Remove patient identifiers from an SRT or VTT file via Ollama or Gemini."
+        )
     )
     parser.add_argument(
         "-i",
         "--input",
         dest="input_path",
         required=True,
-        help="Path to the input .srt file.",
+        help="Path to the input .srt or .vtt file.",
     )
     parser.add_argument(
         "-o",
         "--output",
         dest="output_path",
         default=None,
-        help="Path for the cleaned .srt file (default: <input>_cleaned.srt)",
+        help="Path for the cleaned subtitle file (default: <input>_cleaned.<ext>)",
     )
     parser.add_argument(
         "--model",
@@ -108,14 +112,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--google-model",
-        default="gemini-2.5-flash-lite",
-        help="Gemini model name to invoke (default: gemini-2.5-flash-lite).",
+        default="gemini-3.1-flash-lite",
+        help="Gemini model name to invoke (default: gemini-3.1-flash-lite).",
     )
     return parser.parse_args()
 
 
-def parse_srt_entries(content: str) -> List[SRTEntry]:
-    entries: List[SRTEntry] = []
+def parse_srt_entries(content: str) -> List[SubtitleEntry]:
+    entries: List[SubtitleEntry] = []
     lines = content.splitlines()
     i = 0
 
@@ -135,11 +139,8 @@ def parse_srt_entries(content: str) -> List[SRTEntry]:
             raise ValueError("Unexpected end of file while reading timecode line.")
 
         time_line = lines[i].strip()
-        match = TIME_PATTERN.fullmatch(time_line)
-        if not match:
+        if not SRT_TIME_PATTERN.fullmatch(time_line):
             raise ValueError(f"Invalid timecode on line {i + 1}: {time_line!r}")
-        start = match.group("start")
-        end = match.group("end")
         i += 1
 
         text_lines: List[str] = []
@@ -147,18 +148,75 @@ def parse_srt_entries(content: str) -> List[SRTEntry]:
             text_lines.append(lines[i])
             i += 1
 
-        entries.append(SRTEntry(index=index, start=start, end=end, text_lines=text_lines))
+        entries.append(
+            SubtitleEntry(cue_id=str(index), time_line=time_line, text_lines=text_lines)
+        )
 
     return entries
 
 
-def serialize_entries(entries: Sequence[SRTEntry]) -> str:
+def serialize_entries(entries: Sequence[SubtitleEntry]) -> str:
     blocks = []
     for entry in entries:
-        block_lines = [str(entry.index), f"{entry.start} --> {entry.end}"]
+        block_lines = []
+        if entry.cue_id is not None:
+            block_lines.append(entry.cue_id)
+        block_lines.append(entry.time_line)
         block_lines.extend(entry.text_lines or [""])
         blocks.append("\n".join(block_lines))
     return "\n\n".join(blocks) + "\n"
+
+
+def parse_vtt_entries(content: str) -> List[SubtitleEntry]:
+    lines = content.splitlines()
+    if not lines or not lines[0].strip().startswith("WEBVTT"):
+        raise ValueError("Expected WEBVTT header on line 1.")
+
+    entries: List[SubtitleEntry] = []
+    i = 1
+
+    while i < len(lines) and lines[i].strip() != "":
+        i += 1
+    while i < len(lines) and lines[i].strip() == "":
+        i += 1
+
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+
+        if VTT_TIME_PATTERN.fullmatch(line):
+            cue_id = None
+            time_line = line
+        else:
+            cue_id = lines[i].strip()
+            i += 1
+
+            if i >= len(lines):
+                raise ValueError(
+                    "Unexpected end of file while reading cue timecode line."
+                )
+
+            time_line = lines[i].strip()
+            if not VTT_TIME_PATTERN.fullmatch(time_line):
+                raise ValueError(f"Invalid VTT timecode on line {i + 1}: {time_line!r}")
+        i += 1
+
+        text_lines: List[str] = []
+        while i < len(lines) and lines[i].strip() != "":
+            text_lines.append(lines[i])
+            i += 1
+
+        entries.append(
+            SubtitleEntry(cue_id=cue_id, time_line=time_line, text_lines=text_lines)
+        )
+
+    return entries
+
+
+def serialize_vtt_entries(entries: Sequence[SubtitleEntry]) -> str:
+    return "WEBVTT\n\n" + serialize_entries(entries)
 
 
 def run_ollama_prompt(
@@ -247,6 +305,25 @@ def determine_output_path(input_path: Path, output_arg: str | None) -> Path:
     return input_path.with_name(stem + input_path.suffix)
 
 
+def parse_subtitle_entries(input_path: Path, content: str) -> List[SubtitleEntry]:
+    suffix = input_path.suffix.lower()
+    if suffix == ".srt":
+        return parse_srt_entries(content)
+    if suffix == ".vtt":
+        return parse_vtt_entries(content)
+    raise ValueError(
+        f"Unsupported subtitle extension {input_path.suffix!r}; use .srt or .vtt."
+    )
+
+
+def serialize_subtitle_entries(
+    input_path: Path, entries: Sequence[SubtitleEntry]
+) -> str:
+    if input_path.suffix.lower() == ".vtt":
+        return serialize_vtt_entries(entries)
+    return serialize_entries(entries)
+
+
 def main() -> None:
     args = parse_args()
     input_path = Path(args.input_path).expanduser()
@@ -269,13 +346,14 @@ def main() -> None:
     if args.use_gemini:
         gemini_client = create_gemini_client(args.google_project, args.google_location)
 
-    entries = parse_srt_entries(content)
-    cleaned_entries: List[SRTEntry] = []
+    entries = parse_subtitle_entries(input_path, content)
+    cleaned_entries: List[SubtitleEntry] = []
 
-    for entry in entries:
+    for entry_number, entry in enumerate(entries, start=1):
         original_text = entry.text_block()
         if not args.quiet:
-            print(f"Deidentifying entry {entry.index} ({len(original_text)} chars)...")
+            label = entry.cue_id if entry.cue_id is not None else str(entry_number)
+            print(f"Deidentifying entry {label} ({len(original_text)} chars)...")
 
         if args.use_gemini:
             cleaned_text = run_gemini_prompt(
@@ -298,7 +376,9 @@ def main() -> None:
         entry.text_lines = new_lines if new_lines else [""]
         cleaned_entries.append(entry)
 
-    output_path.write_text(serialize_entries(cleaned_entries), encoding="utf-8")
+    output_path.write_text(
+        serialize_subtitle_entries(input_path, cleaned_entries), encoding="utf-8"
+    )
 
     if not args.quiet:
         print(f"Wrote cleaned subtitles to {output_path}")

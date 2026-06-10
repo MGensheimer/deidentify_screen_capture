@@ -85,6 +85,8 @@ Basic (local Ollama):
 
 ```bash
 uv run deidentify_subtitles.py -i input.srt -o output_cleaned.srt
+# or
+uv run deidentify_subtitles.py -i input.vtt -o output_cleaned.vtt
 ```
 
 Gemini (Vertex AI):
